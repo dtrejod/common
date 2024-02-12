@@ -65,6 +65,7 @@ const (
 	ExpectedUsername                  = "arthurdent"
 	ExpectedPassword                  = "42"
 	ExpectedAccessToken               = "12345"
+	ExpectedCustomHeaderValue         = "custom-header-value"
 )
 
 var invalidHTTPClientConfigs = []struct {
@@ -498,6 +499,39 @@ func TestNewClientFromConfig(t *testing.T) {
 						fmt.Fprint(w, ExpectedMessage)
 					}
 				}
+			},
+		},
+		{
+			clientConfig: HTTPClientConfig{
+				BearerToken: BearerToken,
+				TLSConfig: TLSConfig{
+					CAFile:             TLSCAChainPath,
+					CertFile:           ClientCertificatePath,
+					KeyFile:            ClientKeyNoPassPath,
+					ServerName:         "",
+					InsecureSkipVerify: false,
+				},
+				Headers: map[string]string{
+					"name":          ExpectedCustomHeaderValue,
+					"Authorization": "Custom",
+				},
+			},
+			handler: func(w http.ResponseWriter, r *http.Request) {
+				customHeader := r.Header.Get("name")
+				if customHeader != ExpectedCustomHeaderValue {
+					fmt.Fprintf(w, "The expected custom http request Header value (%s) differs from the obtained value (%s)",
+						ExpectedCustomHeaderValue, customHeader)
+					return
+				}
+
+				// the Custom Authorization header value should be ignored
+				bearer := r.Header.Get("Authorization")
+				if bearer != ExpectedBearer {
+					fmt.Fprintf(w, "The expected Bearer Authorization (%s) differs from the obtained Bearer Authorization (%s)",
+						ExpectedBearer, bearer)
+					return
+				}
+				fmt.Fprint(w, ExpectedMessage)
 			},
 		},
 	}

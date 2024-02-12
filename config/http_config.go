@@ -309,6 +309,9 @@ type HTTPClientConfig struct {
 	// The omitempty flag is not set, because it would be hidden from the
 	// marshalled configuration when set to false.
 	EnableHTTP2 bool `yaml:"enable_http2" json:"enable_http2"`
+	// Headers are custom HTTP headers to be sent along with each request.
+	// Be aware that authorization headers or those set internally by this client can't be overwritten.
+	Headers map[string]string `yaml:"headers,omitempty"`
 	// Proxy configuration.
 	ProxyConfig `yaml:",inline"`
 }
@@ -541,6 +544,10 @@ func NewRoundTripperFromConfig(cfg HTTPClientConfig, name string, optFuncs ...HT
 			http2t.ReadIdleTimeout = time.Minute
 		}
 
+		if len(cfg.Headers) > 0 {
+			rt = NewCustomHeaderRoundTripper(cfg.Headers, rt)
+		}
+
 		// If a authorization_credentials is provided, create a round tripper that will set the
 		// Authorization header correctly on each request.
 		if cfg.Authorization != nil && len(cfg.Authorization.CredentialsFile) > 0 {
@@ -582,6 +589,31 @@ func NewRoundTripperFromConfig(cfg HTTPClientConfig, name string, optFuncs ...HT
 		return newRT(tlsConfig)
 	}
 	return NewTLSRoundTripper(tlsConfig, cfg.TLSConfig.roundTripperSettings(), newRT)
+}
+
+type customHeaderRoundTripper struct {
+	headers map[string]string
+	rt      http.RoundTripper
+}
+
+// NewCustomHeaderRoundTripper adds the provided custom user provided headers to a
+// request unless the header has already been set by another round-tripper.
+func NewCustomHeaderRoundTripper(headers map[string]string, rt http.RoundTripper) http.RoundTripper {
+	return &customHeaderRoundTripper{headers: headers, rt: rt}
+}
+
+func (rt *customHeaderRoundTripper) RoundTrip(req *http.Request) (*http.Response, error) {
+	if len(rt.headers) == 0 {
+		return rt.rt.RoundTrip(req)
+	}
+
+	req = cloneRequest(req)
+	for k, v := range rt.headers {
+		if len(req.Header.Get(k)) == 0 {
+			req.Header.Set(k, v)
+		}
+	}
+	return rt.rt.RoundTrip(req)
 }
 
 type authorizationCredentialsRoundTripper struct {
