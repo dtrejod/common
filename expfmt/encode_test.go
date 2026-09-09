@@ -16,12 +16,14 @@ package expfmt
 import (
 	"bytes"
 	"net/http"
+	"strings"
 	"testing"
 
 	dto "github.com/prometheus/client_model/go"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"google.golang.org/protobuf/proto"
+	"google.golang.org/protobuf/types/known/timestamppb"
 
 	"github.com/prometheus/common/model"
 )
@@ -78,6 +80,21 @@ func TestNegotiate(t *testing.T) {
 			acceptHeaderValue: "text/plain;version=0.0.4; escaping=values;",
 			expectedFmt:       "text/plain; version=0.0.4; charset=utf-8; escaping=values",
 		},
+		{
+			name:              "wildcard */*",
+			acceptHeaderValue: "*/*",
+			expectedFmt:       "text/plain; version=0.0.4; charset=utf-8; escaping=underscores",
+		},
+		{
+			name:              "browser Accept header with wildcard",
+			acceptHeaderValue: "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+			expectedFmt:       "text/plain; version=0.0.4; charset=utf-8; escaping=underscores",
+		},
+		{
+			name:              "json with wildcard fallback",
+			acceptHeaderValue: "application/json, */*",
+			expectedFmt:       "text/plain; version=0.0.4; charset=utf-8; escaping=underscores",
+		},
 	}
 
 	oldDefault := model.NameEscapingScheme
@@ -119,6 +136,11 @@ func TestNegotiateIncludingOpenMetrics(t *testing.T) {
 			name:              "OM format, 1.0.0 version",
 			acceptHeaderValue: "application/openmetrics-text;version=1.0.0",
 			expectedFmt:       "application/openmetrics-text; version=1.0.0; charset=utf-8; escaping=values",
+		},
+		{
+			name:              "OM format, 2.0.0 version",
+			acceptHeaderValue: "application/openmetrics-text;version=2.0.0",
+			expectedFmt:       "text/plain; version=0.0.4; charset=utf-8; escaping=values",
 		},
 		{
 			name:              "OM format, 0.0.1 version with utf-8 is not valid, falls back",
@@ -180,6 +202,21 @@ func TestNegotiateIncludingOpenMetrics(t *testing.T) {
 			acceptHeaderValue: acceptValuePrefix + ";encoding=compact-text; escaping=underscores;",
 			expectedFmt:       "application/vnd.google.protobuf; proto=io.prometheus.client.MetricFamily; encoding=compact-text; escaping=underscores",
 		},
+		{
+			name:              "wildcard */*",
+			acceptHeaderValue: "*/*",
+			expectedFmt:       "text/plain; version=0.0.4; charset=utf-8; escaping=values",
+		},
+		{
+			name:              "browser Accept header with wildcard",
+			acceptHeaderValue: "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+			expectedFmt:       "text/plain; version=0.0.4; charset=utf-8; escaping=values",
+		},
+		{
+			name:              "json with wildcard fallback",
+			acceptHeaderValue: "application/json, */*",
+			expectedFmt:       "text/plain; version=0.0.4; charset=utf-8; escaping=values",
+		},
 	}
 
 	oldDefault := model.NameEscapingScheme
@@ -195,6 +232,87 @@ func TestNegotiateIncludingOpenMetrics(t *testing.T) {
 			actualFmt := string(NegotiateIncludingOpenMetrics(h))
 			if actualFmt != test.expectedFmt {
 				t.Errorf("case %d: expected Negotiate to return format %s, but got %s instead", i, test.expectedFmt, actualFmt)
+			}
+		})
+	}
+}
+
+func TestNegotiateAccept(t *testing.T) {
+	tests := []struct {
+		name              string
+		acceptHeaderValue string
+		acceptedFormats   []Format
+		expectedFmt       string
+	}{
+		{
+			name:              "requested OM 2.0, accepted OM 2.0",
+			acceptHeaderValue: "application/openmetrics-text;version=2.0.0",
+			acceptedFormats:   []Format{fmtOpenMetrics_2_0_0, FmtText},
+			expectedFmt:       "application/openmetrics-text; version=2.0.0; charset=utf-8; escaping=values",
+		},
+		{
+			name:              "requested OM 2.0, not accepted, falls back to text",
+			acceptHeaderValue: "application/openmetrics-text;version=2.0.0",
+			acceptedFormats:   []Format{FmtOpenMetrics_1_0_0, FmtText},
+			expectedFmt:       "text/plain; version=0.0.4; charset=utf-8; escaping=values",
+		},
+		{
+			name:              "requested OM 2.0, not accepted, falls back to first format when no text in accepted",
+			acceptHeaderValue: "application/openmetrics-text;version=2.0.0",
+			acceptedFormats:   []Format{FmtProtoDelim},
+			expectedFmt:       "application/vnd.google.protobuf; proto=io.prometheus.client.MetricFamily; encoding=delimited; escaping=values",
+		},
+		{
+			name:              "requested OM 1.0 and 2.0, prefers higher q value",
+			acceptHeaderValue: "application/openmetrics-text;version=1.0.0;q=0.8, application/openmetrics-text;version=2.0.0;q=0.9",
+			acceptedFormats:   []Format{FmtOpenMetrics_1_0_0, fmtOpenMetrics_2_0_0, FmtText},
+			expectedFmt:       "application/openmetrics-text; version=2.0.0; charset=utf-8; escaping=values",
+		},
+		{
+			name:              "wildcard */* matches text format if present",
+			acceptHeaderValue: "*/*",
+			acceptedFormats:   []Format{fmtOpenMetrics_2_0_0, FmtProtoDelim, FmtText},
+			expectedFmt:       "text/plain; version=0.0.4; charset=utf-8; escaping=values",
+		},
+		{
+			name:              "wildcard */* with text first in accepted",
+			acceptHeaderValue: "*/*",
+			acceptedFormats:   []Format{FmtText, FmtProtoDelim},
+			expectedFmt:       "text/plain; version=0.0.4; charset=utf-8; escaping=values",
+		},
+		{
+			name:              "wildcard */* falls back to first format when no text in accepted",
+			acceptHeaderValue: "*/*",
+			acceptedFormats:   []Format{fmtOpenMetrics_2_0_0, FmtProtoDelim},
+			expectedFmt:       "application/openmetrics-text; version=2.0.0; charset=utf-8; escaping=values",
+		},
+		{
+			name:              "unversioned text/plain matches FmtText",
+			acceptHeaderValue: "text/plain",
+			acceptedFormats:   []Format{FmtProtoDelim, FmtText},
+			expectedFmt:       "text/plain; version=0.0.4; charset=utf-8; escaping=values",
+		},
+		{
+			name:              "empty accepted list defaults to FmtText",
+			acceptHeaderValue: "application/unknown",
+			acceptedFormats:   nil,
+			expectedFmt:       "text/plain; version=0.0.4; charset=utf-8; escaping=values",
+		},
+	}
+
+	oldDefault := model.NameEscapingScheme
+	model.NameEscapingScheme = model.ValueEncodingEscaping
+	defer func() {
+		model.NameEscapingScheme = oldDefault
+	}()
+
+	for i, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			h := http.Header{}
+			h.Add(hdrAccept, test.acceptHeaderValue)
+			actualFmt := string(NegotiateAccept(h, test.acceptedFormats...))
+			if actualFmt != test.expectedFmt {
+				t.Errorf("case %d: expected NegotiateAccept to return format %s, but got %s instead", i, test.expectedFmt, actualFmt)
 			}
 		})
 	}
@@ -265,6 +383,15 @@ foo_metric 1.234
 		{
 			metric: metric1,
 			format: FmtOpenMetrics_1_0_0,
+			expOut: `# TYPE foo_metric unknown
+# UNIT foo_metric seconds
+foo_metric 1.234
+`,
+		},
+		// 8: Untyped fmtOpenMetrics_2_0_0
+		{
+			metric: metric1,
+			format: fmtOpenMetrics_2_0_0,
 			expOut: `# TYPE foo_metric unknown
 # UNIT foo_metric seconds
 foo_metric 1.234
@@ -456,5 +583,108 @@ func TestDottedEncode(t *testing.T) {
 		if lName != scenario.expectLabelName {
 			t.Errorf("%v: incorrect encoded label name, want %v, got %v", scenario.format, scenario.expectLabelName, lName)
 		}
+	}
+}
+
+func BenchmarkNegotiate(b *testing.B) {
+	h := http.Header{}
+	h.Set(hdrAccept, "application/vnd.google.protobuf;proto=io.prometheus.client.MetricFamily;encoding=delimited;q=0.7,text/plain;version=0.0.4;q=0.3,application/json;q=0.1,*/*;q=0.01")
+	b.ReportAllocs()
+	b.ResetTimer()
+	for b.Loop() {
+		_ = Negotiate(h)
+	}
+}
+
+func BenchmarkNegotiateIncludingOpenMetrics(b *testing.B) {
+	h := http.Header{}
+	h.Set(hdrAccept, "application/openmetrics-text;version=1.0.0;q=0.8,application/openmetrics-text;version=0.0.1;q=0.5,text/plain;version=0.0.4;q=0.3,*/*;q=0.1")
+	b.ReportAllocs()
+	b.ResetTimer()
+	for b.Loop() {
+		_ = NegotiateIncludingOpenMetrics(h)
+	}
+}
+
+func BenchmarkNegotiateAccept(b *testing.B) {
+	h := http.Header{}
+	h.Set(hdrAccept, "application/openmetrics-text;version=1.0.0;q=0.8,text/plain;version=0.0.4;q=0.3,*/*;q=0.1")
+	accepted := []Format{FmtOpenMetrics_1_0_0, FmtOpenMetrics_0_0_1, FmtProtoDelim, FmtProtoText, FmtProtoCompact, FmtText}
+	b.ReportAllocs()
+	b.ResetTimer()
+	for b.Loop() {
+		_ = NegotiateAccept(h, accepted...)
+	}
+}
+
+func TestNewEncoder_OpenMetricsVersionDispatch(t *testing.T) {
+	counterMetric := &dto.MetricFamily{
+		Name: proto.String("test_counter"),
+		Type: dto.MetricType_COUNTER.Enum(),
+		Metric: []*dto.Metric{
+			{
+				Counter: &dto.Counter{
+					Value: proto.Float64(42),
+					CreatedTimestamp: &timestamppb.Timestamp{
+						Seconds: 1234567890,
+						Nanos:   0,
+					},
+				},
+			},
+		},
+	}
+
+	tests := []struct {
+		name         string
+		format       Format
+		expectedLine string
+	}{
+		{
+			name:         "OpenMetrics 1.0.0",
+			format:       FmtOpenMetrics_1_0_0,
+			expectedLine: "# TYPE test_counter unknown\ntest_counter 42.0\n",
+		},
+		{
+			name:         "OpenMetrics 0.0.1",
+			format:       FmtOpenMetrics_0_0_1,
+			expectedLine: "# TYPE test_counter unknown\ntest_counter 42.0\n",
+		},
+		{
+			name:         "OpenMetrics 2.0.0 standard",
+			format:       fmtOpenMetrics_2_0_0,
+			expectedLine: "# TYPE test_counter counter\ntest_counter 42.0 st@1234567890\n",
+		},
+		{
+			name:         "OpenMetrics 2.0.0 reordered parameters",
+			format:       Format("application/openmetrics-text; charset=utf-8; version=2.0.0"),
+			expectedLine: "# TYPE test_counter counter\ntest_counter 42.0 st@1234567890\n",
+		},
+		{
+			name:         "OpenMetrics 2.0.0 quoted version parameter",
+			format:       Format(`application/openmetrics-text; version="2.0.0"; charset=utf-8`),
+			expectedLine: "# TYPE test_counter counter\ntest_counter 42.0 st@1234567890\n",
+		},
+		{
+			name:         "OpenMetrics 2.0.0 with escaping scheme",
+			format:       Format("application/openmetrics-text; version=2.0.0; charset=utf-8; escaping=values"),
+			expectedLine: "# TYPE test_counter counter\ntest_counter 42.0 st@1234567890\n",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var buf bytes.Buffer
+			enc := NewEncoder(&buf, tt.format)
+			err := enc.Encode(counterMetric)
+			require.NoError(t, err)
+			closer, ok := enc.(Closer)
+			require.True(t, ok)
+			err = closer.Close()
+			require.NoError(t, err)
+
+			output := buf.String()
+			require.Contains(t, output, tt.expectedLine)
+			require.True(t, strings.HasSuffix(output, "# EOF\n"))
+		})
 	}
 }
